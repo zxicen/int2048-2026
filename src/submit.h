@@ -68,11 +68,11 @@ public:
     int2048 &operator*=(const int2048 &);// ok
     friend int2048 operator*(int2048, const int2048 &);// ok
 
-    int2048 &operator/=(const int2048 &);
-    friend int2048 operator/(int2048, const int2048 &);
+    int2048 &operator/=(const int2048 &);// ok
+    friend int2048 operator/(int2048, const int2048 &);// ok
 
-    int2048 &operator%=(const int2048 &);
-    friend int2048 operator%(int2048, const int2048 &);
+    int2048 &operator%=(const int2048 &);// ok
+    friend int2048 operator%(int2048, const int2048 &);// ok
 
     friend std::istream &operator>>(std::istream &, int2048 &);// ok
     friend std::ostream &operator<<(std::ostream &, const int2048 &);// ok
@@ -92,6 +92,8 @@ private:
     static int comp(const int2048 &, const int2048 &);
     // 加减法函数
     int2048 &signed_add(const int negative, const std::vector<unsigned int> &a);
+    // 除法函数，计算 lhs 除以 rhs 的商和余数，结果分别存储在 quotient 和 remainder 中
+    static void divmod(const int2048 &lhs, const int2048 &rhs, int2048 *quotient, int2048 * remainder);
 };
 } // namespace sjtu
 
@@ -159,13 +161,24 @@ void sub_from(Digits &a, const Digits &b) {
 }
 
 // 左移
-Digits shift_left(const Digits &a, size_t positions) {
+Digits shift_left(const Digits &a, const size_t &positions) {
     if (a.empty() || positions == 0) {
         return a;
     }
     Digits result(positions, 0);
     result.insert(result.end(), a.begin(), a.end());
     return result;
+}
+
+// 右移
+Digits shift_right(const Digits &a, const size_t &positions) {
+    if (a.empty() || positions == 0) {
+        return a;
+    }
+    if (positions >= a.size()) {
+        return Digits();
+    }
+    return Digits(a.begin() + positions, a.end());
 }
 
 // 转换：u64 到 Digits
@@ -246,7 +259,7 @@ template<u32 MOD> u32 qpow(u32 base, u32 exp) {
 }
 
 // 旋转表
-template<u32 MOD, u32 root> struct fac_table {
+template<u32 MOD, u32 root> struct pro_table {
     Digits w;
     void build(const size_t &n) {
         const size_t old_size = w.size() ? w.size() : 1;
@@ -261,8 +274,8 @@ template<u32 MOD, u32 root> struct fac_table {
     }
 };
 
-template<u32 MOD, u32 root> const fac_table<MOD, root> &get_fac_table(const size_t &n) {
-    static fac_table<MOD, root> table;
+template<u32 MOD, u32 root> const pro_table<MOD, root> &get_pro_table(const size_t &n) {
+    static pro_table<MOD, root> table;
     if(table.w.size() < n) {
         table.build(n);
     }
@@ -276,9 +289,9 @@ template<u32 MOD> void ntt(u32 *a, size_t n, bool invert, const u32 *rev) {
             std::swap(a[i], a[rev[i]]);
         }
     }
-    const u32 *w = invert ? 
-                   (MOD == MOD1 ? get_fac_table<MOD1, INV1>(n).w.data() : get_fac_table<MOD2, INV2>(n).w.data()) : 
-                   get_fac_table<MOD, ROOT>(n).w.data();
+    const u32 *w = invert 
+                   ? (MOD == MOD1 ? get_pro_table<MOD1, INV1>(n).w.data() : get_pro_table<MOD2, INV2>(n).w.data()) 
+                   : get_pro_table<MOD, ROOT>(n).w.data();
     for (size_t len = 1; len < n; len <<= 1) {
         for (size_t i = 0; i < n; i += (len << 1)) {
             for (size_t j = 0; j < len; ++j) {
@@ -397,6 +410,121 @@ Digits mul(const Digits &a, const Digits &b) {
         return mul_ntt(a, b);
     }
     return mul_split(a, b);
+}
+
+//------------
+// 除法，牛顿迭代 + 双模 ntt
+//------------
+
+// 估商时额外保留的位数
+const size_t GUARD_BLOCKS = 3;
+// 小于该长度使用朴素除法
+const size_t SHORT_DIV_LIMIT = 3;
+
+// 朴素除法
+void divmod_short(const Digits &a, u64 b, Digits &q, Digits &r) {
+    q.assign(a.size(), 0);
+    u64 rest = 0;
+    for (size_t i = a.size(); i-- > 0; ) {
+        rest = rest * BASE + a[i];
+        q[i] = rest / b;
+        rest %= b;
+    }
+    clear_front_0(q);
+    r = from_u64(rest);
+}
+
+// 求倒数
+Digits reciprocal(const Digits &a) {
+    const size_t n = a.size();
+    if (n <= 2) {
+        return from_u64(static_cast<u64>(BASE) * (n == 1 ? BASE : static_cast<u64>(BASE) * BASE * BASE) / to_u64(a));
+    }
+    
+    const size_t h = n / 2 + 2 < n ? n / 2 + 2 : n - 1;
+    const Digits a_h = reciprocal(shift_right(a, n - h));
+    
+    const Digits pro = mul(a, a_h);
+    Digits unit(n + h + 1, 0);
+    unit[n + h] = 1;
+    const bool greater_flag = comp_abs(pro, unit) > 0;
+    Digits diff = greater_flag ? pro : unit;
+    sub_from(diff, greater_flag ? unit : pro);
+    
+    const size_t keep = n - h + 5;
+    const size_t drop = diff.size() > keep ? diff.size() - keep : 0;
+    Digits correction = mul(a_h, shift_right(diff, drop));
+    correction = drop >= 2 * h 
+                 ? shift_left(correction, drop - 2 * h) 
+                 : shift_right(correction, 2 * h - drop);
+    
+    Digits a_ = shift_left(a_h, n - h);
+    if (greater_flag) {
+        sub_from(a_, correction);
+    }
+    else {
+        add_to(a_, correction);
+    }
+    return a_;
+}
+
+// 修正商
+void divmod_correction(const Digits &a, const Digits &b, const Digits &reciprocal_b, const size_t &s, Digits &q, Digits &r) {
+    if (comp_abs(a, b) < 0) {
+        q.clear();
+        r = a;
+        return ;
+    }
+    const size_t drop = a.size() > s + 2 ? a.size() - (s + 2) : 0;
+    q = shift_right(mul(shift_right(a, drop), reciprocal_b), s + b.size() - drop);
+    
+    Digits one(1, 1);
+    Digits pro = mul(b, q);
+    while (comp_abs(pro, a) > 0) {
+        sub_from(q, one);
+        sub_from(pro, b);
+    }
+    r = a;
+    sub_from(r, pro);
+    while(comp_abs(r, b) >= 0) {
+        sub_from(r, b);
+        add_to(q, one);
+    }
+}
+
+// 除法函数
+void divmod_abs(const Digits &a, const Digits &b, Digits &q, Digits &r) {
+    if (comp_abs(a, b) < 0) {
+        q.clear();
+        r = a;
+        return ;
+    }
+    const size_t n = a.size(), m = b.size();
+    if (m <= SHORT_DIV_LIMIT) {
+        divmod_short(a, to_u64(b), q, r);
+        return ;
+    }
+    
+    const size_t k = n - m + 1;
+    const size_t c = k < m ? k : m;
+    const size_t s = c + GUARD_BLOCKS;
+    const Digits reciprocal_b = reciprocal(s <= m ? shift_right(b, m - s) : shift_left(b, s - m));
+    
+    q.assign(k, 0);
+    r = shift_right(a, k);
+    Digits a_, q_;
+    for (size_t hi = k; hi > 0;) {
+        const size_t take = hi < s ? hi : s;
+        a_.assign(a.begin() + hi - take, a.begin() + hi);
+        a_.insert(a_.end(), r.begin(), r.end());
+        clear_front_0(a_);
+        divmod_correction(a_, b, reciprocal_b, s, q_, r);
+        for(size_t i = 0; i < q_.size(); ++i) {
+            q[hi - take + i] = q_[i];
+        }
+        hi -= take;
+    }
+    clear_front_0(q);
 }
 
 } // namespace
@@ -618,6 +746,44 @@ int2048 operator*(int2048 lhs, const int2048 &rhs) {
     return lhs;
 }
 
+// 除法函数
+void int2048::divmod(const int2048 &lhs, const int2048 &rhs, int2048 *quotient, int2048 * remainder) {
+    const bool signs_diff = lhs.negative_ ^ rhs.negative_;
+    Digits q, r;
+    divmod_abs(lhs.digits_, rhs.digits_, q, r);
+    if (signs_diff && !r.empty()) {
+        add_to(q, Digits(1, 1));
+        Digits tmp = rhs.digits_;
+        sub_from(tmp, r);
+        r.swap(tmp);
+    }
+    if (quotient) {
+        quotient->digits_.swap(q);
+        quotient->negative_ = signs_diff && !quotient->digits_.empty();
+    }
+    if (remainder) {
+        remainder->digits_.swap(r);
+        remainder->negative_ = rhs.negative_ && !remainder->digits_.empty();
+    }
+}
+
+int2048 &int2048::operator/=(const int2048 &rhs) {
+    divmod(*this, rhs, this, nullptr);
+    return *this;
+}
+int2048 &int2048::operator%=(const int2048 &rhs) {
+    divmod(*this, rhs, nullptr, this);
+    return *this;
+}
+
+int2048 operator/(int2048 lhs, const int2048 &rhs) {
+    lhs /= rhs;
+    return lhs;
+}
+int2048 operator%(int2048 lhs, const int2048 &rhs) {
+    lhs %= rhs;
+    return lhs;
+}
 
 } // namespace sjtu
 
